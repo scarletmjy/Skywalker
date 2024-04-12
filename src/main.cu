@@ -87,7 +87,7 @@ DEFINE_bool(twc, false, "using twc");
 DEFINE_bool(static, true, "using static scheduling");
 DEFINE_bool(buffer, false, "buffered write for memory (problem-prone)");
 
-DEFINE_int32(m, 4, "block per sm");
+DEFINE_int32(m, 2, "block per sm");
 
 DEFINE_bool(peritr, false, "invoke kernel for each itr");
 
@@ -108,7 +108,30 @@ DEFINE_bool(gmem, false, "do not use shmem as buffer");
 DEFINE_bool(newsampler, true, "use new sampler");
 DEFINE_bool(csv, false, "CSV output");
 
+DEFINE_bool(seq, false, "seed in sequence");
+
+static __global__ void test_kernel() {
+  cg::grid_group grid_threads = cg::this_grid();
+  // auto grid_threads = cg::this_thread_block();
+  grid_threads.sync();
+}
+
 int main(int argc, char *argv[]) {
+  // dim3 gridDim(128);
+  // dim3 blockDim(256);
+  // void *args[] = {};
+  // int sharedMemBytes = 0;
+
+  // cudaError_t error = cudaLaunchCooperativeKernel(
+  //     (void *)test_kernel, gridDim, blockDim, args, sharedMemBytes, 0);
+  // if (error != cudaSuccess) {
+  //   printf("Failed to launch kernel: %s\n", cudaGetErrorString(error));
+  //   // Handle error
+  // }
+  // // test_kernel<<<32, 32, 0, 0>>>();
+  // cudaDeviceSynchronize();
+  // printf("main test\n");
+
   gflags::ParseCommandLineFlags(&argc, &argv, true);
 
   // if (numa_available() < 0) {
@@ -133,8 +156,8 @@ int main(int argc, char *argv[]) {
   // }
   // override flag
 #ifdef LOCALITY
-    FLAGS_peritr = false;
-    LOG("warning: LOCALITY works with fused kernel\n");
+  FLAGS_peritr = false;
+  LOG("warning: LOCALITY works with fused kernel\n");
 #endif
   if (FLAGS_hmgraph) {
     FLAGS_umgraph = false;
@@ -158,20 +181,20 @@ int main(int argc, char *argv[]) {
     // FLAGS_bias = false;  //we could run node2vec in unbiased app currently.
     FLAGS_rw = true;
     FLAGS_k = 1;
-    FLAGS_d = 100;
+    FLAGS_d = 80;
   }
   if (FLAGS_deepwalk) {
     // FLAGS_ol=true;
     FLAGS_rw = true;
     FLAGS_k = 1;
-    FLAGS_d = 100;
+    FLAGS_d = 80;
   }
   if (FLAGS_ppr) {
     // FLAGS_ol=true;
     FLAGS_rw = true;
     FLAGS_k = 1;
-    FLAGS_d = 100;
-    FLAGS_tp = 0.15;
+    FLAGS_d = 80;
+    FLAGS_tp = 0.2;
   }
   if (FLAGS_sage) {
     // FLAGS_ol=true;
@@ -290,8 +313,20 @@ int main(int argc, char *argv[]) {
       }
 
       if (FLAGS_bias && FLAGS_ol) {  // online biased
-        samplers[dev_id].SetSeed(local_sample_size, Depth + 1, hops, dev_num,
-                                 dev_id);
+        // samplers[dev_id].SetSeed(local_sample_size, Depth + 1, hops, dev_num,
+        //  dev_id);
+
+        if (FLAGS_ppr) {
+          samplers[dev_id].SetSeed3(ginst, ginst->numNode, local_sample_size,
+                                    Depth + 1, hops, dev_num, dev_id);
+        } else {
+          if (FLAGS_full || FLAGS_seq)
+            samplers[dev_id].SetSeed(local_sample_size, Depth + 1, hops,
+                                     dev_num, dev_id);
+          else
+            samplers[dev_id].SetSeed2(ginst->numNode, local_sample_size,
+                                      Depth + 1, hops, dev_num, dev_id);
+        }
         if (!FLAGS_rw) {
           // if (!FLAGS_sp)
           if (FLAGS_newsampler) {
@@ -308,7 +343,15 @@ int main(int argc, char *argv[]) {
           // spliced
         } else {
           Walker walker(samplers[dev_id]);
-          walker.SetSeed(local_sample_size, Depth + 1, dev_num, dev_id);
+          // walker.SetSeed(local_sample_size, Depth + 1, dev_num, dev_id);
+          if (FLAGS_ppr) {
+            walker.SetSeed3(ginst, local_sample_size, Depth + 1);
+          } else {
+            if (FLAGS_full || FLAGS_seq)
+              walker.SetSeed(local_sample_size, Depth + 1, dev_num, dev_id);
+            else
+              walker.SetSeed2(ginst->numNode, local_sample_size, Depth + 1);
+          }
           if (FLAGS_gmem)
             time[dev_id] = OnlineWalkGMem(walker);
           else
@@ -377,7 +420,7 @@ int main(int argc, char *argv[]) {
     {
       size_t sampled = 0;
       // (!FLAGS_bias || !FLAGS_ol) &&
-      if ( (!FLAGS_rw) && FLAGS_newsampler)
+      if ((!FLAGS_rw) && FLAGS_newsampler)
         for (size_t i = 0; i < num_device; i++) {
           sampled += samplers_new[i].sampled_edges;  // / total_time /1000000
         }
@@ -418,5 +461,6 @@ int main(int argc, char *argv[]) {
     }
     printf("\n");
   }
+
   return 0;
 }

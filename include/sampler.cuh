@@ -323,6 +323,75 @@ class Sampler {
     // printf("first ten seed:");
     // printH(result.data,10 );
   }
+
+  void SetSeed2(uint num_nodes, uint _num_seed, uint _hop_num, uint *_hops,
+                uint dev_num = 1, uint dev_id = 0) {
+    num_seed = _num_seed;
+    // std::random_device rd;
+    // std::mt19937 gen(56);
+    // std::uniform_int_distribution<> dis(1, 10000);  // ggraph.vtx_num);
+    uint *seeds = new uint[num_seed];
+    // for (int n = num_seed / dev_num * dev_id;
+    //      n < num_seed / dev_num * (dev_id + 1); ++n)
+    // srand(10086);
+    std::random_device seed;       // 硬件生成随机数种子
+    std::ranlux48 engine(seed());  // 利用种子生成随机数引擎
+    std::uniform_int_distribution<> distrib(
+        0, num_seed);  // 设置随机数范围，并为均匀分布
+    // int random = distrib(engine);
+    if (!FLAGS_replica) {
+      for (int n = 0; n < num_seed; ++n) {
+#ifdef check
+        // seeds[n] = n;
+#else
+        // seeds[n] = dev_id + n * dev_num;
+        // seeds[n] = rand() % num_nodes;
+        seeds[n] = distrib(engine);
+// seeds[n] = dis(gen);
+#endif  // check
+      }
+    } else {
+      for (int n = 0; n < num_seed; ++n) {
+        // seeds[n] = n;
+        // seeds[n] = rand() % num_nodes;
+        seeds[n] = distrib(engine);
+      }
+    }
+    result.init(num_seed, _hop_num, _hops, seeds, device_id);
+    // printf("first ten seed:");
+    // printH(result.data,10 );
+  }
+
+  void SetSeed3(Graph *ginst, uint num_nodes, uint _num_seed, uint _hop_num,
+                uint *_hops, uint dev_num = 1, uint dev_id = 0) {
+    num_seed = _num_seed;
+    // std::random_device rd;
+    // std::mt19937 gen(56);
+    // std::uniform_int_distribution<> dis(1, 10000);  // ggraph.vtx_num);
+    uint *seeds = new uint[num_seed];
+    // for (int n = num_seed / dev_num * dev_id;
+    //      n < num_seed / dev_num * (dev_id + 1); ++n)
+    if (!FLAGS_replica) {
+      for (int n = 0; n < num_seed; ++n) {
+#ifdef check
+        // seeds[n] = n;
+#else
+        // seeds[n] = dev_id + n * dev_num;
+        seeds[n] = ginst->MaxDegreeNode;
+// seeds[n] = dis(gen);
+#endif  // check
+      }
+    } else {
+      for (int n = 0; n < num_seed; ++n) {
+        // seeds[n] = n;
+        seeds[n] = ginst->MaxDegreeNode;
+      }
+    }
+    result.init(num_seed, _hop_num, _hops, seeds, device_id);
+    // printf("first ten seed:");
+    // printH(result.data,10 );
+  }
+
   void InitFullForConstruction(uint ngpu = 1, uint index = 0) {
     // uint local_vtx_num =
     //     (index == (ngpu - 1))
@@ -499,6 +568,58 @@ class Walker {
     } else {
       for (int n = 0; n < num_seed; ++n) {
         seeds[n] = n + dev_id * num_seed;
+      }
+    }
+    result.init(num_seed, _hop_num, seeds, device_id);
+    CUDA_RT_CALL(cudaFree(seeds));
+  }
+  void SetSeed2(uint num_nodes, uint _num_seed, uint _hop_num) {
+    // int dev_id = omp_get_thread_num();
+    // int dev_num = omp_get_num_threads();
+    num_seed = _num_seed;
+    // paster(num_seed);
+    // std::random_device rd;
+    // std::mt19937 gen(56);
+    // std::uniform_int_distribution<> dis(1, 10000);  // ggraph.vtx_num);
+    // uint *seeds = new uint[num_seed];
+    srand(100);
+    uint *seeds;
+    CUDA_RT_CALL(cudaMallocManaged(&seeds, num_seed * sizeof(uint)));
+    if (FLAGS_itl) {
+      for (int n = 0; n < num_seed; ++n) {
+        seeds[n] = rand() % num_nodes;
+        // seeds[n] = dev_id + n * dev_num;
+      }
+    } else {
+      for (int n = 0; n < num_seed; ++n) {
+        // seeds[n] = n + dev_id * num_seed;
+        seeds[n] = rand() % num_nodes;
+      }
+    }
+    result.init(num_seed, _hop_num, seeds, device_id);
+    CUDA_RT_CALL(cudaFree(seeds));
+  }
+  void SetSeed3(Graph *ginst, uint _num_seed, uint _hop_num) {
+    // int dev_id = omp_get_thread_num();
+    // int dev_num = omp_get_num_threads();
+    num_seed = _num_seed;
+    // paster(num_seed);
+    // std::random_device rd;
+    // std::mt19937 gen(56);
+    // std::uniform_int_distribution<> dis(1, 10000);  // ggraph.vtx_num);
+    // uint *seeds = new uint[num_seed];
+    srand(0);
+    uint *seeds;
+    CUDA_RT_CALL(cudaMallocManaged(&seeds, num_seed * sizeof(uint)));
+    if (FLAGS_itl) {
+      for (int n = 0; n < num_seed; ++n) {
+        seeds[n] = ginst->MaxDegreeNode;
+        // seeds[n] = dev_id + n * dev_num;
+      }
+    } else {
+      for (int n = 0; n < num_seed; ++n) {
+        // seeds[n] = n + dev_id * num_seed;
+        seeds[n] = ginst->MaxDegreeNode;
       }
     }
     result.init(num_seed, _hop_num, seeds, device_id);

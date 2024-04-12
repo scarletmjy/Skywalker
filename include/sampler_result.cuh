@@ -1,9 +1,11 @@
 #pragma once
+#include <cooperative_groups.h>
 #include <gflags/gflags.h>
 #include <omp.h>
 
 #include "frontier.cuh"
 #include "vec.cuh"
+namespace cg = cooperative_groups;
 
 DECLARE_int32(device);
 DECLARE_double(hd);
@@ -469,6 +471,7 @@ struct Jobs_result<JobType::RW, T> {
   int *job_sizes = nullptr;
   uint *data2;
   uint device_id;
+  int *lock;
 
   SamplerState<JobType::NODE2VEC, T> *state;
   float p = 2.0, q = 0.5;
@@ -506,6 +509,8 @@ struct Jobs_result<JobType::RW, T> {
     CUDA_RT_CALL(cudaMemset(alive, 1, size * sizeof(char)));
     CUDA_RT_CALL(MyCudaMalloc(&length, size * sizeof(uint)));
     // CUDA_RT_CALL(cudaMemset(length, 0, size * sizeof(uint)));
+    CUDA_RT_CALL(MyCudaMalloc(&lock, 100 * sizeof(int)));
+    CUDA_RT_CALL(cudaMemset(lock, 0, 100 * sizeof(int)));
 
     if (FLAGS_node2vec) {
       CUDA_RT_CALL(MyCudaMalloc(
@@ -595,7 +600,8 @@ struct Jobs_result<JobType::RW, T> {
       // for (size_t i = 0; i < MIN(3, size); i++) {
       //   printf("%u \t", GetData(0, i));
       // }
-      for (int j = 0; j < MIN(3, size); j++) {
+      for (int j = 0; j < size; j++) {
+        // for (int j = 0; j < MIN(3, size); j++) {
         printf("\n%drd path len %u \n", j, length[j]);
         for (size_t i = 0; i < MIN(length[j], hop_num); i++) {
           printf("%u \t", GetData(i, j));
@@ -643,8 +649,66 @@ struct Jobs_result<JobType::RW, T> {
     }
     return job;
   }
+  __device__ struct sample_job_new requireOneHighDegreeJob_block(
+      uint current_itr) {
+    sample_job_new job;
+    job.val = false;
+    int old;
+    cg::grid_group grid_threads = cg::this_grid();
+    if (threadIdx.x == 0) {
+      old = atomicAdd(high_degrees[current_itr].floor, 1);
+    }
+    grid_threads.sync();
+    if (threadIdx.x == 0) {
+      if (old < high_degrees[current_itr].Size()) {
+        job.instance_idx = high_degrees[current_itr].Get(old);
+        job.val = true;
+      } else {
+        atomicAdd(high_degrees[current_itr].floor, -1);
+        // int old = my_atomicSub(high_degrees[current_itr].floor, 1);
+      }
+    }
+    grid_threads.sync();
+    return job;
+  }
+  __device__ struct sample_job_new requireOneJob_warp(
+      uint current_itr)  // uint hop
+  {
+    // use grid sync will lead to deadlock here
+    //  while (atomicCAS(&lock[current_itr], 0, 1) == 1)
+    //    ;
+    sample_job_new job;
+    job.val = false;
+    cg::grid_group grid_threads = cg::this_grid();
+    int old;
+    if (threadIdx.x % WARP_SIZE == 0) {
+      // printf("requireOneJob for itr %u\n", current_itr);
+      // paster(job_sizes[current_itr]);
+      // int old = atomicSub(&job_sizes[current_itr], 1) - 1;
+      old = atomicAdd(&job_sizes_floor[current_itr], 1);
+    }
+    grid_threads.sync();
+    if (threadIdx.x % WARP_SIZE == 0) {
+      if (old < job_sizes[current_itr]) {
+        // printf("poping wl ele idx %d\n", old);
+        job.idx_in_frontier = (uint)old;
+        job.instance_idx = getNodeId2(old, current_itr);
+        job.val = true;
+        // printf("poping wl ele node_id %d\n", job.node_id);
+      } else {
+        atomicSub(&job_sizes_floor[current_itr], 1);
+      }
+    }
+    grid_threads.sync();
+    // atomicExch(&lock[current_itr], 0);
+    return job;
+  }
+
   __device__ struct sample_job_new requireOneJob(uint current_itr)  // uint hop
   {
+    // use grid sync will lead to deadlock here
+    // while (atomicCAS(&lock[current_itr], 0, 1) == 1)
+    //   ;
     sample_job_new job;
     job.val = false;
     // printf("requireOneJob for itr %u\n", current_itr);
@@ -660,10 +724,13 @@ struct Jobs_result<JobType::RW, T> {
     } else {
       int old = atomicSub(&job_sizes_floor[current_itr], 1);
     }
+    // atomicExch(&lock[current_itr], 0);
     return job;
   }
   __device__ void AddActive(uint current_itr, uint candidate) {
     int old = atomicAdd(&job_sizes[current_itr + 1], 1);
+    // printf("AddActive itr:%u,old:%d,candidate:%u\n", current_itr, old,
+    //        candidate);
     *(getNextAddr(current_itr) + old) = candidate;
     // printf("Add new ele %u with degree %d\n", candidate,  );
   }

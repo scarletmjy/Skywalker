@@ -5,7 +5,10 @@
  * @LastEditTime: 2022-04-11 14:10:21
  * @FilePath: /skywalker/src/online_walk.cu
  */
+#include <cooperative_groups.h>
+
 #include "app.cuh"
+namespace cg = cooperative_groups;
 
 static __device__ void SampleWarpCentic(Jobs_result<JobType::RW, uint> &result,
                                         gpu_graph *ggraph, curandState state,
@@ -79,9 +82,9 @@ static __device__ void SampleBlockCentic(Jobs_result<JobType::RW, uint> &result,
   table->Clean();
 }
 
-static __global__ void OnlineWalkKernel(Walker *sampler,
-                                        Vector_pack<uint> *vector_pack,
-                                        float *tp) {
+static __global__ void OnlineWalkKernel_old(Walker *sampler,
+                                            Vector_pack<uint> *vector_pack,
+                                            float *tp) {
   Jobs_result<JobType::RW, uint> &result = sampler->result;
   gpu_graph *ggraph = &sampler->ggraph;
   Vector_pack<uint> *vector_packs = &vector_pack[BID];
@@ -164,6 +167,154 @@ static __global__ void OnlineWalkKernel(Walker *sampler,
     __syncthreads();
   }
 }
+
+// static __global__ void test_kernel(){
+
+//   cg::grid_group grid_threads = cg::this_grid();
+//   // auto grid_threads = cg::this_thread_block();
+//   grid_threads.sync();
+// }
+
+static __global__ void OnlineWalkKernel(Walker *sampler,
+                                        Vector_pack<uint> *vector_pack,
+                                        float *tp) {
+  // if (threadIdx.x == 0) printf("=======OnlineWalkKernel======\n");
+
+  // auto grid_threads = cg::this_thread_block();
+  // grid_threads.sync();
+  Jobs_result<JobType::RW, uint> &result = sampler->result;
+  gpu_graph *ggraph = &sampler->ggraph;
+  Vector_pack<uint> *vector_packs = &vector_pack[BID];
+  __shared__ alias_table_constructor_shmem<uint, thread_block_tile<32>>
+      table[WARP_PER_BLK];
+  void *buffer = &table[0];
+  curandState state;
+  curand_init(TID, 0, 0, &state);
+
+  __shared__ uint current_itr;
+  if (threadIdx.x == 0) current_itr = 0;
+  __syncthreads();
+  cg::grid_group grid_threads = cg::this_grid();
+  for (; current_itr < result.hop_num - 1;) {
+    // __threadfence_block();
+
+    // int tid = threadIdx.x;
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    int grid_size = grid_threads.size();
+    int warp_cnt = grid_size / WARP_SIZE;
+    int job_cnt = result.job_sizes[current_itr];
+
+    for (int i = gid / WARP_SIZE; i < job_cnt + warp_cnt - job_cnt % warp_cnt;
+         i += warp_cnt) {
+      sample_job_new job;
+      // if (LID == 0) {
+      //   job = result.requireOneJob(current_itr);
+      // }
+      job = result.requireOneJob_warp(current_itr);
+      __syncwarp(FULL_WARP_MASK);
+      // grid_threads.sync();
+      job.val = __shfl_sync(FULL_WARP_MASK, job.val, 0);
+      job.instance_idx = __shfl_sync(FULL_WARP_MASK, job.instance_idx, 0);
+      __syncwarp(FULL_WARP_MASK);
+      // grid_threads.sync();
+
+      uint node_id = result.GetData(current_itr, job.instance_idx);
+      // if (LID == 0) printf("node_id %d\n", node_id);
+      // bool stop =
+      //     __shfl_sync(FULL_WARP_MASK, (curand_uniform(&state) < *tp), 0);
+      // if (!stop) {
+      // if (ggraph->getDegree(node_id) < ELE_PER_WARP) {
+      //   SampleWarpCentic(result, ggraph, state, current_itr, node_id, buffer,
+      //                    job.instance_idx);
+      // } else {
+      // while (job.val) {
+      grid_threads.sync();
+      if (job.val) {
+        uint node_id = result.GetData(current_itr, job.instance_idx);
+        // if (LID == 0) printf("node_id %d\n", node_id);
+        bool stop =
+            __shfl_sync(FULL_WARP_MASK, (curand_uniform(&state) < *tp), 0);
+        if (!stop) {
+          if (ggraph->getDegree(node_id) < ELE_PER_WARP) {
+            SampleWarpCentic(result, ggraph, state, current_itr, node_id,
+                             buffer, job.instance_idx);
+          } else {
+#ifdef skip8k
+            if (LID == 0 && ggraph->getDegree(node_id) < 8000)
+#else
+            if (LID == 0)
+#endif  // skip8k
+              result.AddHighDegree(current_itr, job.instance_idx);
+          }
+        } else {
+          if (LID == 0) result.length[job.instance_idx] = current_itr;
+        }
+        //   __syncwarp(FULL_WARP_MASK);
+        // }
+        // if (LID == 0) job = result.requireOneJob(current_itr);
+        // __syncwarp(FULL_WARP_MASK);
+        // job.val = __shfl_sync(FULL_WARP_MASK, job.val, 0);
+        // job.instance_idx = __shfl_sync(FULL_WARP_MASK, job.instance_idx,
+        // 0);
+        // __syncwarp(FULL_WARP_MASK);
+        // grid_threads.sync();
+        // }
+        // }
+      }
+      grid_threads.sync();
+    }
+    __syncthreads();
+    grid_threads.sync();
+    __shared__ sample_job_new high_degree_job;  // really use job_id
+    __shared__ uint node_id;
+
+    int bid = blockIdx.x;
+    int block_cnt = blockDim.x;
+    int large_job_cnt = result.high_degrees[current_itr].Size();
+    for (int i = bid; i < large_job_cnt + block_cnt - large_job_cnt % block_cnt;
+         i += block_cnt) {
+      sample_job_new tmp;
+      // if (LTID == 0) {
+      tmp = result.requireOneHighDegreeJob_block(current_itr);
+      // }
+      // grid_threads.sync();
+      if (LTID == 0) {
+        high_degree_job.val = tmp.val;
+        high_degree_job.instance_idx = tmp.instance_idx;
+        if (tmp.val) {
+          node_id = result.GetData(current_itr, high_degree_job.instance_idx);
+        }
+      }
+      __syncthreads();
+      // grid_threads.sync();
+
+      //  while (high_degree_job.val) {
+      if (high_degree_job.val) {
+        SampleBlockCentic(result, ggraph, state, current_itr, node_id, buffer,
+                          vector_packs,
+                          high_degree_job.instance_idx);  // buffer_pointer
+        __syncthreads();
+        // if (LTID == 0) {
+        //   sample_job_new tmp = result.requireOneHighDegreeJob(current_itr);
+        //   high_degree_job.val = tmp.val;
+        //   high_degree_job.instance_idx = tmp.instance_idx;
+        //   if (high_degree_job.val) {
+        //     node_id = result.GetData(current_itr,
+        //     high_degree_job.instance_idx);
+        //   }
+        // }
+        // __syncthreads();
+        // grid_threads.sync();
+      }
+      grid_threads.sync();
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      result.NextItr(current_itr);
+    }
+    __syncthreads();
+  }
+}
 static __device__ uint get_smid() {
   uint ret;
   asm("mov.u32 %0, %smid;" : "=r"(ret));
@@ -222,7 +373,8 @@ static __global__ void OnlineWalkKernelStatic(Walker *sampler,
     size_t node_id = result.GetData(current_itr, local_high_degree.Get(i));
     SampleBlockCentic(result, ggraph, state, current_itr, node_id, buffer,
                       vector_packs, local_high_degree.Get(i));
-    // if (LTID == 0) result.length[local_high_degree.Get(i)]= current_itr+1;
+    // if (LTID == 0) result.length[local_high_degree.Get(i)]=
+    // current_itr+1;
   }
 }
 
@@ -306,11 +458,23 @@ float OnlineWalkShMem(Walker &sampler) {
     if (FLAGS_debug)
       OnlineWalkKernel<<<1, BLOCK_SIZE, 0, 0>>>(sampler_ptr, vector_packs,
                                                 tp_d);
-    else
-      OnlineWalkKernel<<<block_num, BLOCK_SIZE, 0, 0>>>(sampler_ptr,
-                                                        vector_packs, tp_d);
-  }
+    else {
+      dim3 gridDim(block_num);
+      dim3 blockDim(BLOCK_SIZE);
+      int sharedMemBytes = 0;
+      void *args[] = {(void *)&sampler_ptr, (void *)&vector_packs,
+                      (void *)&tp_d};
 
+      cudaLaunchCooperativeKernel((void *)OnlineWalkKernel, gridDim, blockDim,
+                                  args, sharedMemBytes, 0);
+
+      // OnlineWalkKernel_old<<<block_num, BLOCK_SIZE, 0, 0>>>(sampler_ptr,
+      //                                                       vector_packs,
+      //                                                       tp_d);
+      // CUDA_RT_CALL(cudaDeviceSynchronize());
+    }
+  }
+  //   test_kernel<<<block_num, BLOCK_SIZE, 0, 0>>>();
   CUDA_RT_CALL(cudaDeviceSynchronize());
   // CUDA_RT_CALL(cudaPeekAtLastError());
   total_time = wtime() - start_time;
@@ -324,4 +488,5 @@ float OnlineWalkShMem(Walker &sampler) {
   if (FLAGS_printresult) print_result<<<1, 32, 0, 0>>>(sampler_ptr);
   CUDA_RT_CALL(cudaDeviceSynchronize());
   return total_time;
+  // return 1.0;
 }

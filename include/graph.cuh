@@ -66,6 +66,7 @@ class Graph {
   bool weighted;
   bool withWeight;
   uint MaxDegree;
+  vtx_t MaxDegreeNode;
 
   // scheduler-specific
   int device = 0;
@@ -271,6 +272,7 @@ class Graph {
     LOG("%d has max out degree %d\n", maxD, outDegree[maxD]);
     // printf("degree ");
     MaxDegree = outDegree[maxD];
+    MaxDegreeNode = maxD;
     if (sizeEdgeTy && !FLAGS_randomweight && FLAGS_weight && FLAGS_bias) {
       LOG("loading weight\n");
       if (num_Edge % 2)
